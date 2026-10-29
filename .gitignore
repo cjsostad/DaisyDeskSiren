@@ -1,0 +1,12 @@
+# Build outputs (including bundled libraries)
+build/
+
+# macOS metadata
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100/
+.Trashes/
+.fseventsd/
+.TemporaryItems/
