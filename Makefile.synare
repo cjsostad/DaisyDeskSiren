@@ -1,0 +1,29 @@
+# DubSauce — Seed3 Desktop SYNARE drum engine (bench v0.1)
+# Standalone bench build for the Synare engine. Does NOT touch the siren Makefile.
+#   make -f Makefile.synare              # build
+#   make -f Makefile.synare program-dfu  # flash (bootloader already installed by the siren build)
+# This replaces the running app on the Seed3; flash the siren's `make program-dfu` to switch back.
+TARGET = DubSauceSynare
+
+DEBUG = 0
+OPT = -O3
+
+# Program runs from SRAM, loaded by the external-DFU bootloader (already installed once).
+APP_TYPE = BOOT_SRAM
+
+CPP_SOURCES = src/main_synare.cpp
+
+C_INCLUDES += -Isrc
+
+# libDaisy v9.0.0 + DaisySP live inside this project folder
+LIBDAISY_DIR = libDaisy
+DAISYSP_DIR  = DaisySP
+
+USE_FATFS = 0
+
+SYSTEM_FILES_DIR = $(LIBDAISY_DIR)/core
+
+# External-DFU bootloader (requires libDaisy v9.0.0).
+BOOT_BIN = $(SYSTEM_FILES_DIR)/dsy_bootloader_v6_4-extdfu-2000ms.bin
+
+include $(SYSTEM_FILES_DIR)/Makefile

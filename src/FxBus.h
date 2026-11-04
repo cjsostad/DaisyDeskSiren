@@ -10,13 +10,6 @@
 #include "ControlShell.h"
 #include <cmath>
 
-// The big delay buffer lives in the 256 KB RAM_D2 region via the custom linker section
-// added to core/STM32H750IB_sram.lds. This is always-on internal RAM, so — unlike external
-// SDRAM on a BOOT_SRAM app — it is guaranteed live before the first audio IRQ. If you ever
-// re-clone/replace libDaisy, re-add that section or this buffer overflows DTCMRAM and the
-// FX build won't link. The reverb (~41 KB) stays in default RAM (DTCMRAM).
-#define DSY_RAMD2_BSS __attribute__((section(".ram_d2_bss")))
-
 namespace dubsauce
 {
 // ---- compact mono Freeverb-style reverb (4 combs + 2 allpass) ----
@@ -55,22 +48,19 @@ class MiniReverb
     }
 
   private:
+    // NO in-class initializers here: fxReverb lives in SDRAM (DSY_SDRAM_BSS), and global ctors
+    // run before hw.Init() powers up the SDRAM controller. An in-class default would make this
+    // object's constructor write to not-yet-ready SDRAM and hard-fault at boot. Init() (called
+    // from FxInit, after hw.Init) sets all of these at runtime instead.
     daisysp::DelayLine<float, 2048> comb_[4];
     daisysp::DelayLine<float, 1024> ap_[2];
-    float damp_[4] = {0.f, 0.f, 0.f, 0.f};
-    float fb_ = 0.84f, dampCoef_ = 0.3f;
+    float damp_[4];
+    float fb_, dampCoef_;
 };
 
-// INTERNAL SRAM — no SDRAM. On this SRAM-loaded (BOOT_SRAM) app the external SDRAM
-// controller isn't reliably up when the audio IRQ first runs, so any read of a buffer
-// at 0xC0000000 hard-faults and freezes the MCU (dead unit, one stuck LED frame). The
-// whole FX bus therefore lives in internal SRAM, the same memory the working voice uses.
-// Cost: shorter max delay (~1.2 s). Plenty for dub; we can revisit SDRAM for 2 s+ later.
-static constexpr size_t FX_MAXDEL = 57600; // ~1.2 s @ 48 kHz, internal RAM_D2
-static daisysp::DelayLine<float, FX_MAXDEL> DSY_RAMD2_BSS fxDelayBuf;
-// fxReverb (~41 KB) stays in default RAM (DTCMRAM). Its ctor runs before main(), which is
-// safe because DTCMRAM is internal and always live (this would hard-fault in external SDRAM).
-static MiniReverb          fxReverb;
+static constexpr size_t FX_MAXDEL = 96000; // ~2 s @ 48 kHz, in SDRAM
+static daisysp::DelayLine<float, FX_MAXDEL> DSY_SDRAM_BSS fxDelayBuf;
+static MiniReverb          DSY_SDRAM_BSS fxReverb;   // its comb/allpass buffers → SDRAM
 static daisysp::Oscillator fxFlutter;                // wow/flutter modulator
 static float fxSr = 48000.f, fxCurDelay = 14400.f, fxTargetDelay = 14400.f, fxTapeLP = 0.f;
 
@@ -87,12 +77,9 @@ inline void FxInit(float sr)
     fxTapeLP = 0.f;
 }
 
-// dry = siren (mono); inL/inR = line in; sends come from the Live page (VR7/VR8).
-inline void FxProcess(float dry, float inL, float inR,
-                      float delaySend, float reverbSend,
-                      const FxParams& fx, float& outL, float& outR)
+// Shared tape stage: advance the smoothed/fluttered delay time and return the current echo tap.
+inline float fxTapeRead_(const FxParams& fx)
 {
-    // smoothed delay time (manual one-pole, no fonepole dependency)
     float tgt = fx.delay_time_ms * 0.001f * fxSr;
     if(tgt > (float)(FX_MAXDEL - 2)) tgt = (float)(FX_MAXDEL - 2);
     if(tgt < 1.f) tgt = 1.f;
@@ -102,13 +89,20 @@ inline void FxProcess(float dry, float inL, float inR,
     float dtime = fxCurDelay * (1.f + fxFlutter.Process() * fx.flutter);
     if(dtime < 1.f) dtime = 1.f;
     fxDelayBuf.SetDelay(dtime);
+    return fxDelayBuf.Read();
+}
 
-    float inMono = 0.5f * (inL + inR);
-    float busSrc = dry + inMono;
+// dry = siren (mono); inL/inR = line in; sends come from the Live page (VR7/VR8).
+inline void FxProcess(float dry, float inL, float inR,
+                      float delaySend, float reverbSend,
+                      const FxParams& fx, float& outL, float& outR)
+{
+    float echo    = fxTapeRead_(fx);
+    float inMono  = 0.5f * (inL + inR);
+    float busSrc  = dry + inMono;
 
     // tape echo with filtered + saturated feedback (manual one-pole LP = tape bandwidth)
-    float echo = fxDelayBuf.Read();
-    float k    = 1.f - expf(-2.f * 3.14159265f * fx.tape_tone / fxSr);
+    float k = 1.f - expf(-2.f * 3.14159265f * fx.tape_tone / fxSr);
     if(k < 0.f) k = 0.f; else if(k > 1.f) k = 1.f;
     fxTapeLP += k * (echo * fx.feedback - fxTapeLP);
     float fb = tanhf(fxTapeLP * (1.f + fx.drive * 2.f));
@@ -119,6 +113,36 @@ inline void FxProcess(float dry, float inL, float inR,
     float damp = 1.f - fx.rev_tone / 18000.f;
     fxReverb.SetDamp(damp < 0.05f ? 0.05f : (damp > 0.6f ? 0.6f : damp));
     float revIn = busSrc * reverbSend + echo * reverbSend * 0.5f;
+    float rev   = fxReverb.Process(revIn);
+
+    outL = tanhf(dry + inL + echo + rev);
+    outR = tanhf(dry + inR + echo + rev);
+    if(!std::isfinite(outL)) outL = 0.f;
+    if(!std::isfinite(outR)) outR = 0.f;
+}
+
+// Per-voice-send variant for the multi-engine build:
+//   dry        = summed DIRECT signal (all voices, heard dry)
+//   sendDelay  = already-weighted sum feeding the echo  (Σ voice*itsDelaySend)
+//   sendReverb = already-weighted sum feeding the reverb (Σ voice*itsReverbSend)
+// Line-in is mixed dry and sent at a modest fixed amount so throws still touch external audio.
+inline void FxProcessMix(float dry, float sendDelay, float sendReverb,
+                         float inL, float inR,
+                         const FxParams& fx, float& outL, float& outR)
+{
+    float echo   = fxTapeRead_(fx);
+    float inMono = 0.5f * (inL + inR);
+
+    float k = 1.f - expf(-2.f * 3.14159265f * fx.tape_tone / fxSr);
+    if(k < 0.f) k = 0.f; else if(k > 1.f) k = 1.f;
+    fxTapeLP += k * (echo * fx.feedback - fxTapeLP);
+    float fb = tanhf(fxTapeLP * (1.f + fx.drive * 2.f));
+    fxDelayBuf.Write(sendDelay + inMono * 0.3f + fb);
+
+    fxReverb.SetFeedback(fx.rev_decay);
+    float damp = 1.f - fx.rev_tone / 18000.f;
+    fxReverb.SetDamp(damp < 0.05f ? 0.05f : (damp > 0.6f ? 0.6f : damp));
+    float revIn = sendReverb + inMono * 0.3f + echo * 0.25f;
     float rev   = fxReverb.Process(revIn);
 
     outL = tanhf(dry + inL + echo + rev);
