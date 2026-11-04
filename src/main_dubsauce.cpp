@@ -329,6 +329,11 @@ void AudioCallback(AudioHandle::InputBuffer  in,
 int main(void)
 {
     hw.Init();
+    // Drop the audio sample rate from the 48 kHz default to 32 kHz for ~33% CPU headroom.
+    // Every per-sample calculation in the whole box (voices, FX, filter) now runs a third less
+    // often. Only cost is dulling above ~16 kHz — imperceptible for this instrument through a PA.
+    // To revert to 48 kHz, just delete this line.
+    hw.seed.SetAudioSampleRate(SaiHandle::Config::SampleRate::SAI_32KHZ);
     System::Delay(50);
     float sr = hw.seed.AudioSampleRate();
     siren.Init(sr);

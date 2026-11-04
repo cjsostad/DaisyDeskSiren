@@ -154,22 +154,27 @@ class SynareVoice
 
     float Process()
     {
-        float amp   = ampEnv_.Process();
-        float penv  = pitchEnv_.Process();                   // 1 -> 0
-        float fenv  = filtEnv_.Process();                    // 1 -> 0
-        float lfo   = (p_.lfo_depth_oct > 0.f)
-                        ? lfo_.Process(p_.lfo_rate_hz, p_.lfo_wave, 0.f, 0.f) : 0.f;
+        float amp  = ampEnv_.Process();
+        float penv = pitchEnv_.Process();                     // 1 -> 0
+        float fenv = filtEnv_.Process();                      // 1 -> 0
 
-        // ---- pitch: base * sweep * lfo ----
+        // ---- pitch: base * sweep * (lfo — skipped entirely when depth is 0) ----
         float base = (noteHz_ > 0.f) ? noteHz_ : p_.tune_hz;
-        float octs = p_.sweep_oct * penv + p_.lfo_depth_oct * lfo;
-        float f1   = daisysp::fclamp(base * exp2f(octs), 10.f, 18000.f);
+        float octs = p_.sweep_oct * penv;
+        if(p_.lfo_depth_oct > 1e-4f)
+        {
+            float lfo = lfo_.Process(p_.lfo_rate_hz, p_.lfo_wave, 0.f, 0.f);
+            octs += p_.lfo_depth_oct * lfo;
+        }
+        float f1 = daisysp::fclamp(base * exp2f(octs), 10.f, 18000.f);
 
         osc1_.SetFreq(f1);
         setWave_(osc1_, p_.osc_wave);
         float s = p_.osc1_level * osc1_.Process();
 
-        if(p_.osc2_level > 0.f)
+        // osc2 is a per-sample PolyBLEP Process — one of the costliest calls in this voice,
+        // so skip it entirely when the patch doesn't use it.
+        if(p_.osc2_level > 1e-4f)
         {
             float f2 = daisysp::fclamp(f1 * exp2f(p_.osc2_semi / 12.f), 10.f, 18000.f);
             osc2_.SetFreq(f2);
@@ -177,12 +182,15 @@ class SynareVoice
             s += p_.osc2_level * osc2_.Process();
         }
 
-        // ---- noise bed + attack click ----
-        if(p_.noise_level > 0.f) s += p_.noise_level * noise_.Process();
-        if(click_ > 1.0e-4f)     { s += click_ * noise_.Process(); click_ *= clickCoef_; }
+        // ---- noise bed + attack click (skip both when neither is in use) ----
+        if(p_.noise_level > 1e-4f || click_ > 1.0e-4f)
+        {
+            if(p_.noise_level > 1e-4f) s += p_.noise_level * noise_.Process();
+            if(click_          > 1e-4f) { s += click_ * noise_.Process(); click_ *= clickCoef_; }
+        }
 
-        // ---- drive ----
-        if(p_.drive > 0.f) s = tanhf(s * (1.f + p_.drive * 8.f));
+        // ---- drive (skip the tanhf when not driven) ----
+        if(p_.drive > 1e-4f) s = tanhf(s * (1.f + p_.drive * 8.f));
 
         // ---- resonant filter (bipolar env -> cutoff, up to +/-4 oct) ----
         // Fast path: when filt_env_amt is ~0 (the default), skip the per-sample exp2f entirely.
