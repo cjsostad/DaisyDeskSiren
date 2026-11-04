@@ -135,6 +135,20 @@ SECTIONS
 		PROVIDE(__bss_end__ = _ebss);
 	} > DTCMRAM
 
+	/* DMA-reachable BSS in D1 AXI SRAM (0x24000000) -- same power domain as the
+	   SDMMC1 controller/IDMA. FatFS/SD objects go here: the SDMMC DMA cannot reach
+	   DTCM, and D2 SRAM (cross-domain) gave FR_DISK_ERR. AXI SRAM matches libDaisy's
+	   known-working SD examples. */
+	.axisram_bss (NOLOAD) :
+	{
+		. = ALIGN(32);
+		_saxisram_bss = .;
+		*(.axisram_bss)
+		*(.axisram_bss*)
+		. = ALIGN(32);
+		_eaxisram_bss = .;
+	} > SRAM
+
 	.dtcmram_bss (NOLOAD) :
 	{
 		. = ALIGN(4);
@@ -235,6 +249,23 @@ SECTIONS
 
 		PROVIDE(__qspiflash_bss_end = _eqspiflash_bss);
 	} > QSPIFLASH
+
+	/* DubSauce: general-purpose bss in the 256 KB RAM_D2 region (otherwise only the unused
+	   heap lives here). Gives big audio buffers (the FX delay line) a home in always-on
+	   internal RAM, so they never depend on external SDRAM — which on a BOOT_SRAM app isn't
+	   reliably up when the audio IRQ first runs and hard-faults the MCU. RAM_D2 is NOLOAD and
+	   far from the loadable code, so it does NOT bloat the flashed .bin. Cleared at runtime by
+	   DelayLine::Init. If you re-clone/replace libDaisy, re-add this section or the FX build
+	   won't link (the buffer overflows DTCMRAM). */
+	.ram_d2_bss (NOLOAD) :
+	{
+		. = ALIGN(4);
+		_sram_d2_bss = .;
+		*(.ram_d2_bss)
+		*(.ram_d2_bss*)
+		. = ALIGN(4);
+		_eram_d2_bss = .;
+	} > RAM_D2
 
 	.heap (NOLOAD) :
 	{
